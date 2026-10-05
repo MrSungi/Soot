@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Soot</AssemblyName>
+    <RootNamespace>Soot</RootNamespace>
+    <StartupObject>Soot.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="Assets\Soot.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
