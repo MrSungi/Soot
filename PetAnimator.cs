@@ -8,6 +8,7 @@ namespace Soot;
 internal enum PetReaction
 {
     Wave,
+    PettingBlink,
     Pickup,
     Release
 }
@@ -21,6 +22,7 @@ internal sealed class PetAnimator
     private static readonly TimeSpan ReleaseDuration = TimeSpan.FromMilliseconds(520);
     private static readonly TimeSpan WalkFrameDuration = TimeSpan.FromMilliseconds(125);
     private static readonly TimeSpan BlinkDuration = TimeSpan.FromMilliseconds(125);
+    private static readonly TimeSpan PettingBlinkDuration = TimeSpan.FromMilliseconds(600);
 
     private readonly BitmapSource idleFrame;
     private readonly BitmapSource blinkFrame;
@@ -51,6 +53,13 @@ internal sealed class PetAnimator
     internal void React(PetReaction reaction)
     {
         activeReaction = reaction;
+        reactionElapsed = 0;
+    }
+
+    internal void CancelReaction(PetReaction? reaction = null)
+    {
+        if (reaction is not null && activeReaction != reaction) return;
+        activeReaction = null;
         reactionElapsed = 0;
     }
 
@@ -135,6 +144,7 @@ internal sealed class PetAnimator
         var frame = reaction switch
         {
             PetReaction.Wave => WaveFrameAt(reactionElapsed),
+            PetReaction.PettingBlink => blinkFrame,
             PetReaction.Pickup => pickupFrame,
             PetReaction.Release => releaseFrame,
             _ => idleFrame
@@ -151,6 +161,7 @@ internal sealed class PetAnimator
     private static double ReactionDuration(PetReaction reaction) => reaction switch
     {
         PetReaction.Wave => WaveFrameDuration.TotalSeconds * 4,
+        PetReaction.PettingBlink => PettingBlinkDuration.TotalSeconds,
         PetReaction.Pickup => PickupDuration.TotalSeconds,
         PetReaction.Release => ReleaseDuration.TotalSeconds,
         _ => WaveFrameDuration.TotalSeconds
