@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -27,6 +28,7 @@ public sealed class PetWindow : Window
     private readonly PetSettings settings;
     private readonly PetAnimator animator;
     private readonly PetPanel panel;
+    private readonly Dictionary<BitmapSource, byte[]> alphaMaps = new();
 
     private bool pointerDown;
     private bool dragging;
@@ -38,6 +40,11 @@ public sealed class PetWindow : Window
     private double lastDragDirectionX;
     private DateTime lastTick = DateTime.UtcNow;
     private DateTime lastHoverReaction = DateTime.MinValue;
+    private bool hoverActive;
+    private bool pettingUsed;
+    private bool pettingBlinkActive;
+    private Point hoverAnchor;
+    private double hoverDwell;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct CursorPoint { public int X; public int Y; }
@@ -79,6 +86,7 @@ public sealed class PetWindow : Window
         PreviewMouseLeftButtonUp += OnMouseUp;
         MouseMove += OnMouseMove;
         MouseEnter += OnMouseEnter;
+        MouseLeave += OnMouseLeave;
         LostMouseCapture += OnLostMouseCapture;
         timer.Tick += Tick;
         timer.Start();
@@ -149,6 +157,7 @@ public sealed class PetWindow : Window
     private void OnMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left || !GetCursorPos(out pressCursor)) return;
+        CancelPetting();
         pointerDown = true;
         dragging = false;
         panelWasOpenAtPress = panel.IsOpen;
@@ -163,13 +172,29 @@ public sealed class PetWindow : Window
     private void OnMouseEnter(object sender, MouseEventArgs e)
     {
         var now = DateTime.UtcNow;
-        if (now - lastHoverReaction < TimeSpan.FromSeconds(2)) return;
-        lastHoverReaction = now;
-        animator.React(PetReaction.Wave);
+        if (now - lastHoverReaction >= TimeSpan.FromSeconds(2))
+        {
+            lastHoverReaction = now;
+            animator.React(PetReaction.Wave);
+        }
+        hoverActive = true;
+        pettingUsed = false;
+        pettingBlinkActive = false;
+        hoverDwell = 0;
+        hoverAnchor = Mouse.GetPosition(this);
+    }
+
+    private void OnMouseLeave(object sender, MouseEventArgs e)
+    {
+        hoverActive = false;
+        hoverDwell = 0;
+        if (pettingBlinkActive) animator.CancelReaction(PetReaction.PettingBlink);
+        pettingBlinkActive = false;
     }
 
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
+        if (pointerDown) CancelPetting();
         if (!pointerDown || e.LeftButton != MouseButtonState.Pressed || !GetCursorPos(out var cursor)) return;
         var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var dx = cursor.X - pressCursor.X;
@@ -257,11 +282,76 @@ public sealed class PetWindow : Window
         var movedY = Top - beforeTop;
         var isWalking = dragging || Math.Abs(movedX) + Math.Abs(movedY) > 0.08;
         if (dragging && Math.Abs(lastDragDirectionX) > 0.1) facingRight = lastDragDirectionX > 0;
+        UpdatePetting(elapsed);
         var pose = animator.Update(elapsed, isWalking, facingRight, settings.AnimationsEnabled);
         sprite.Source = pose.Frame;
         sprite.Opacity = pose.Opacity;
         scale.ScaleX = pose.ScaleX;
         scale.ScaleY = pose.ScaleY;
+    }
+
+    private void UpdatePetting(double elapsed)
+    {
+        if (!hoverActive || pointerDown || dragging || pettingUsed || !settings.AnimationsEnabled || !IsMouseOver)
+        {
+            if (!settings.AnimationsEnabled) CancelPetting();
+            return;
+        }
+
+        var point = Mouse.GetPosition(this);
+        var dx = point.X - hoverAnchor.X;
+        var dy = point.Y - hoverAnchor.Y;
+        if (Math.Sqrt(dx * dx + dy * dy) > 6)
+        {
+            hoverAnchor = point;
+            hoverDwell = 0;
+        }
+
+        if (!IsArtworkAt(point))
+        {
+            hoverDwell = 0;
+            hoverAnchor = point;
+            return;
+        }
+
+        hoverDwell += elapsed;
+        if (hoverDwell < 1) return;
+        pettingUsed = true;
+        pettingBlinkActive = true;
+        animator.React(PetReaction.PettingBlink);
+    }
+
+    private bool IsArtworkAt(Point point)
+    {
+        if (sprite.Source is not BitmapSource source || sprite.ActualWidth <= 0 || sprite.ActualHeight <= 0) return false;
+        var scaleFactor = Math.Min(sprite.ActualWidth / source.PixelWidth, sprite.ActualHeight / source.PixelHeight);
+        var drawnWidth = source.PixelWidth * scaleFactor;
+        var drawnHeight = source.PixelHeight * scaleFactor;
+        var local = TranslatePoint(point, sprite);
+        var x = (int)((local.X - (sprite.ActualWidth - drawnWidth) / 2) / scaleFactor);
+        var y = (int)((local.Y - (sprite.ActualHeight - drawnHeight) / 2) / scaleFactor);
+        if (x < 0 || y < 0 || x >= source.PixelWidth || y >= source.PixelHeight) return false;
+
+        if (!alphaMaps.TryGetValue(source, out var alpha))
+        {
+            var converted = new FormatConvertedBitmap(source, PixelFormats.Pbgra32, null, 0);
+            var pixels = new byte[converted.PixelWidth * converted.PixelHeight * 4];
+            converted.CopyPixels(pixels, converted.PixelWidth * 4, 0);
+            alpha = new byte[converted.PixelWidth * converted.PixelHeight];
+            for (var i = 0; i < alpha.Length; i++) alpha[i] = pixels[i * 4 + 3];
+            alphaMaps[source] = alpha;
+        }
+
+        return alpha[y * source.PixelWidth + x] > 8;
+    }
+
+    private void CancelPetting()
+    {
+        pettingUsed = true;
+        hoverDwell = 0;
+        if (!pettingBlinkActive) return;
+        animator.CancelReaction(PetReaction.PettingBlink);
+        pettingBlinkActive = false;
     }
 
     private bool ShouldPlacePanelLeft()
