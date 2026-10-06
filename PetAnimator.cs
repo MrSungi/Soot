@@ -10,7 +10,8 @@ internal enum PetReaction
     Wave,
     PettingBlink,
     Pickup,
-    Release
+    Release,
+    StretchYawn
 }
 
 internal readonly record struct PetPose(BitmapSource Frame, double ScaleX, double ScaleY, double Opacity);
@@ -23,6 +24,7 @@ internal sealed class PetAnimator
     private static readonly TimeSpan WalkFrameDuration = TimeSpan.FromMilliseconds(125);
     private static readonly TimeSpan BlinkDuration = TimeSpan.FromMilliseconds(125);
     private static readonly TimeSpan PettingBlinkDuration = TimeSpan.FromMilliseconds(600);
+    private static readonly double[] StretchYawnFrameDurations = { 0.25, 0.22, 0.22, 0.24, 0.65, 0.25, 0.25, 0.25 };
 
     private readonly BitmapSource idleFrame;
     private readonly BitmapSource blinkFrame;
@@ -31,6 +33,7 @@ internal sealed class PetAnimator
     private readonly BitmapSource releaseFrame;
     private readonly BitmapSource[] rightFrames;
     private readonly BitmapSource[] leftFrames;
+    private readonly BitmapSource[] stretchYawnFrames;
     private double elapsed;
     private double untilBlink = NextBlinkDelay();
     private double blinkRemaining;
@@ -38,8 +41,9 @@ internal sealed class PetAnimator
     private PetReaction? activeReaction;
     private double walkFrameElapsed;
     private int walkFrameIndex;
+    private double untilStretchYawn = NextStretchYawnDelay();
 
-    internal PetAnimator(BitmapSource sheet)
+    internal PetAnimator(BitmapSource sheet, BitmapSource stretchYawnSheet)
     {
         idleFrame = Crop(sheet, 0, 0);
         blinkFrame = Crop(sheet, 384, 0);
@@ -48,6 +52,8 @@ internal sealed class PetAnimator
         releaseFrame = Crop(sheet, 768, 832);
         rightFrames = Enumerable.Range(0, 8).Select(i => Crop(sheet, i * 192, 208)).ToArray();
         leftFrames = Enumerable.Range(0, 8).Select(i => Crop(sheet, i * 192, 416)).ToArray();
+        stretchYawnFrames = Enumerable.Range(0, StretchYawnFrameDurations.Length)
+            .Select(i => Crop(stretchYawnSheet, i * 192, 0)).ToArray();
     }
 
     internal void React(PetReaction reaction)
@@ -63,7 +69,7 @@ internal sealed class PetAnimator
         reactionElapsed = 0;
     }
 
-    internal PetPose Update(double deltaSeconds, bool walking, bool facingRight, bool enabled)
+    internal PetPose Update(double deltaSeconds, bool walking, bool facingRight, bool enabled, bool idleAnimationEligible)
     {
         var delta = Math.Clamp(deltaSeconds, 0, 0.1);
         elapsed += delta;
@@ -72,6 +78,12 @@ internal sealed class PetAnimator
             activeReaction = null;
             reactionElapsed = 0;
             return new PetPose(idleFrame, 1, 1, 1);
+        }
+
+        if (activeReaction == PetReaction.StretchYawn && (walking || !idleAnimationEligible))
+        {
+            activeReaction = null;
+            reactionElapsed = 0;
         }
 
         if (activeReaction is PetReaction.Pickup && walking && reactionElapsed >= PickupDuration.TotalSeconds)
@@ -114,6 +126,14 @@ internal sealed class PetAnimator
 
         walkFrameIndex = 0;
         walkFrameElapsed = 0;
+        if (idleAnimationEligible) untilStretchYawn -= delta;
+        if (idleAnimationEligible && untilStretchYawn <= 0)
+        {
+            activeReaction = PetReaction.StretchYawn;
+            reactionElapsed = 0;
+            untilStretchYawn = NextStretchYawnDelay();
+            return ReactionPose(PetReaction.StretchYawn, reactionElapsed);
+        }
         if (blinkRemaining > 0)
         {
             blinkRemaining = Math.Max(0, blinkRemaining - delta);
@@ -147,6 +167,7 @@ internal sealed class PetAnimator
             PetReaction.PettingBlink => blinkFrame,
             PetReaction.Pickup => pickupFrame,
             PetReaction.Release => releaseFrame,
+            PetReaction.StretchYawn => StretchYawnFrameAt(reactionElapsed),
             _ => idleFrame
         };
         return new PetPose(frame, scaleX, scaleY, opacity);
@@ -158,12 +179,24 @@ internal sealed class PetAnimator
         return waveFrames[frameIndex];
     }
 
+    private BitmapSource StretchYawnFrameAt(double reactionElapsed)
+    {
+        var elapsed = reactionElapsed;
+        for (var i = 0; i < StretchYawnFrameDurations.Length - 1; i++)
+        {
+            elapsed -= StretchYawnFrameDurations[i];
+            if (elapsed < 0) return stretchYawnFrames[i];
+        }
+        return stretchYawnFrames[^1];
+    }
+
     private static double ReactionDuration(PetReaction reaction) => reaction switch
     {
         PetReaction.Wave => WaveFrameDuration.TotalSeconds * 4,
         PetReaction.PettingBlink => PettingBlinkDuration.TotalSeconds,
         PetReaction.Pickup => PickupDuration.TotalSeconds,
         PetReaction.Release => ReleaseDuration.TotalSeconds,
+        PetReaction.StretchYawn => StretchYawnFrameDurations.Sum(),
         _ => WaveFrameDuration.TotalSeconds
     };
 
@@ -174,6 +207,7 @@ internal sealed class PetAnimator
     }
 
     private static double NextBlinkDelay() => 4.5 + Random.Shared.NextDouble() * 4.0;
+    private static double NextStretchYawnDelay() => 30 + Random.Shared.NextDouble() * 30;
 
     private static BitmapSource Crop(BitmapSource sheet, int x, int y) =>
         new CroppedBitmap(sheet, new Int32Rect(x, y, 192, 208));

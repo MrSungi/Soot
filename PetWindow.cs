@@ -5,9 +5,11 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Forms = System.Windows.Forms;
 
 namespace Soot;
 
@@ -37,6 +39,7 @@ public sealed class PetWindow : Window
     private CursorPoint lastCursor;
     private double pressLeft;
     private double pressTop;
+    private NativeRect pressWindowRect;
     private double lastDragDirectionX;
     private DateTime lastTick = DateTime.UtcNow;
     private DateTime lastHoverReaction = DateTime.MinValue;
@@ -49,13 +52,29 @@ public sealed class PetWindow : Window
     [StructLayout(LayoutKind.Sequential)]
     private struct CursorPoint { public int X; public int Y; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left; public int Top; public int Right; public int Bottom; }
+
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out CursorPoint point);
+
+    private IntPtr WindowHandle => new WindowInteropHelper(this).EnsureHandle();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
 
     public PetWindow()
     {
         var sheet = new BitmapImage(new Uri(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Soot.png")));
-        animator = new PetAnimator(sheet);
+        var stretchYawnSheet = new BitmapImage(new Uri(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Soot-yawn.png")));
+        animator = new PetAnimator(sheet, stretchYawnSheet);
         settings = PetSettingsStore.Load();
 
         Width = PetWidth;
@@ -68,9 +87,11 @@ public sealed class PetWindow : Window
         ResizeMode = ResizeMode.NoResize;
         Content = BuildPet();
 
-        var area = SystemParameters.WorkArea;
-        Left = Clamp(settings.Left ?? area.Right - Width - 30, area.Left, area.Right - Width);
-        Top = Clamp(settings.Top ?? area.Bottom - Height - 24, area.Top, area.Bottom - Height);
+        var primary = Forms.Screen.PrimaryScreen!;
+        var area = ToDip(primary.WorkingArea, GetDpiForScreen(primary));
+        Left = settings.Left ?? area.Right - Width - 30;
+        Top = settings.Top ?? area.Bottom - Height - 24;
+        ClampToNearestWorkArea();
 
         panel = new PetPanel(sprite, new PetPanelContext
         {
@@ -164,6 +185,7 @@ public sealed class PetWindow : Window
         lastCursor = pressCursor;
         pressLeft = Left;
         pressTop = Top;
+        GetWindowRect(WindowHandle, out pressWindowRect);
         lastDragDirectionX = 0;
         Mouse.Capture(this);
         e.Handled = true;
@@ -196,10 +218,9 @@ public sealed class PetWindow : Window
     {
         if (pointerDown) CancelPetting();
         if (!pointerDown || e.LeftButton != MouseButtonState.Pressed || !GetCursorPos(out var cursor)) return;
-        var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var dx = cursor.X - pressCursor.X;
         var dy = cursor.Y - pressCursor.Y;
-        var threshold = Math.Max(SystemParameters.MinimumHorizontalDragDistance, SystemParameters.MinimumVerticalDragDistance) * dpi;
+        var threshold = Math.Max(SystemParameters.MinimumHorizontalDragDistance, SystemParameters.MinimumVerticalDragDistance) * VisualTreeHelper.GetDpi(this).DpiScaleX;
 
         if (!dragging && Math.Sqrt((double)dx * dx + (double)dy * dy) >= threshold)
         {
@@ -211,9 +232,8 @@ public sealed class PetWindow : Window
         if (!dragging) return;
         lastDragDirectionX = cursor.X - lastCursor.X;
         lastCursor = cursor;
-        var area = SystemParameters.WorkArea;
-        Left = Clamp(pressLeft + dx / dpi, area.Left, area.Right - Width);
-        Top = Clamp(pressTop + dy / dpi, area.Top, area.Bottom - Height);
+        // Keep the drag continuous across the virtual desktop; constrain it on release.
+        SetWindowPos(WindowHandle, IntPtr.Zero, pressWindowRect.Left + dx, pressWindowRect.Top + dy, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
         e.Handled = true;
     }
 
@@ -224,6 +244,7 @@ public sealed class PetWindow : Window
         Mouse.Capture(null);
         if (dragging)
         {
+            ClampToNearestWorkArea();
             SaveSettings();
             animator.React(PetReaction.Release);
         }
@@ -242,6 +263,7 @@ public sealed class PetWindow : Window
         if (!pointerDown) return;
         if (dragging)
         {
+            ClampToNearestWorkArea();
             SaveSettings();
             animator.React(PetReaction.Release);
         }
@@ -258,23 +280,28 @@ public sealed class PetWindow : Window
         var beforeLeft = Left;
         var beforeTop = Top;
         var facingRight = true;
-        if (settings.Following && !dragging && GetCursorPos(out var cursor))
+        if (settings.Following && !dragging && GetCursorPos(out var cursor) && GetWindowRect(WindowHandle, out var windowRect))
         {
-            var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
-            var centerX = (Left + Width / 2) * dpi;
-            var centerY = (Top + Height / 2) * dpi;
+            var centerX = (windowRect.Left + windowRect.Right) / 2;
+            var centerY = (windowRect.Top + windowRect.Bottom) / 2;
             var dx = cursor.X - centerX;
             var dy = cursor.Y - centerY;
-            var distance = Math.Sqrt(dx * dx + dy * dy) / dpi;
-            if (distance >= 14 && distance <= FollowRadius)
+            var distance = Math.Sqrt(dx * dx + dy * dy);
+            var petMonitor = GetScreenAt(centerX, centerY);
+            var cursorMonitor = GetScreenAt(cursor.X, cursor.Y);
+            var monitorDpi = GetDpiForScreen(petMonitor);
+            if (petMonitor == cursorMonitor && distance >= 14 * monitorDpi && distance <= FollowRadius * monitorDpi)
             {
-                var area = SystemParameters.WorkArea;
-                var desiredX = cursor.X / dpi - Width / 2;
-                var desiredY = cursor.Y / dpi - Height / 2;
-                var amount = 0.035 * (1 - distance / FollowRadius) + 0.006;
-                Left = Clamp(Left + (desiredX - Left) * amount, area.Left, area.Right - Width);
-                Top = Clamp(Top + (desiredY - Top) * amount, area.Top, area.Bottom - Height);
-                facingRight = Left >= beforeLeft;
+                var area = petMonitor.WorkingArea;
+                var windowWidth = windowRect.Right - windowRect.Left;
+                var windowHeight = windowRect.Bottom - windowRect.Top;
+                var desiredX = cursor.X - windowWidth / 2;
+                var desiredY = cursor.Y - windowHeight / 2;
+                var amount = 0.035 * (1 - distance / (FollowRadius * monitorDpi)) + 0.006;
+                var nextX = Clamp(windowRect.Left + (desiredX - windowRect.Left) * amount, area.Left, area.Right - windowWidth);
+                var nextY = Clamp(windowRect.Top + (desiredY - windowRect.Top) * amount, area.Top, area.Bottom - windowHeight);
+                SetWindowPos(WindowHandle, IntPtr.Zero, (int)nextX, (int)nextY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+                facingRight = nextX >= windowRect.Left;
             }
         }
 
@@ -283,7 +310,8 @@ public sealed class PetWindow : Window
         var isWalking = dragging || Math.Abs(movedX) + Math.Abs(movedY) > 0.08;
         if (dragging && Math.Abs(lastDragDirectionX) > 0.1) facingRight = lastDragDirectionX > 0;
         UpdatePetting(elapsed);
-        var pose = animator.Update(elapsed, isWalking, facingRight, settings.AnimationsEnabled);
+        var idleAnimationEligible = !hoverActive && !pointerDown && !dragging && !panel.IsOpen;
+        var pose = animator.Update(elapsed, isWalking, facingRight, settings.AnimationsEnabled, idleAnimationEligible);
         sprite.Source = pose.Frame;
         sprite.Opacity = pose.Opacity;
         scale.ScaleX = pose.ScaleX;
@@ -356,13 +384,13 @@ public sealed class PetWindow : Window
 
     private bool ShouldPlacePanelLeft()
     {
-        var area = SystemParameters.WorkArea;
+        var area = GetWorkAreaForWindow();
         return Left + PetWidth + PetPanel.Width + 24 > area.Right;
     }
 
     private void ResetPosition()
     {
-        var area = SystemParameters.WorkArea;
+        var area = GetWorkAreaForWindow();
         Left = area.Right - Width - 30;
         Top = area.Bottom - Height - 24;
         SaveSettings();
@@ -418,6 +446,51 @@ public sealed class PetWindow : Window
     }
 
     private void SaveSettings() => PetSettingsStore.Save(settings, Left, Top);
+
+    private void ClampToNearestWorkArea()
+    {
+        if (!GetWindowRect(WindowHandle, out var rect)) return;
+        var windowBounds = new System.Drawing.Rectangle(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
+        var area = Forms.Screen.FromRectangle(windowBounds).WorkingArea;
+        var x = (int)Clamp(rect.Left, area.Left, Math.Max(area.Left, area.Right - windowBounds.Width));
+        var y = (int)Clamp(rect.Top, area.Top, Math.Max(area.Top, area.Bottom - windowBounds.Height));
+        SetWindowPos(WindowHandle, IntPtr.Zero, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+    }
+
+    private Forms.Screen GetScreenAt(double physicalX, double physicalY) =>
+        Forms.Screen.FromPoint(new System.Drawing.Point((int)physicalX, (int)physicalY));
+
+    private Forms.Screen GetScreenAt(CursorPoint point) => GetScreenAt(point.X, point.Y);
+
+    private Forms.Screen GetWorkScreenForWindow()
+    {
+        var dpi = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        return GetScreenAt((Left + Width / 2) * dpi, (Top + Height / 2) * dpi);
+    }
+
+    private Rect GetWorkAreaForWindow()
+    {
+        var screen = GetWorkScreenForWindow();
+        return ToDip(screen.WorkingArea, GetDpiForScreen(screen));
+    }
+
+    private static Rect ToDip(System.Drawing.Rectangle bounds, double dpi) =>
+        new(bounds.Left / dpi, bounds.Top / dpi, bounds.Width / dpi, bounds.Height / dpi);
+
+    private static double GetDpiForScreen(Forms.Screen screen)
+    {
+        try
+        {
+            var monitor = MonitorFromPoint(new NativePoint { X = screen.Bounds.Left + screen.Bounds.Width / 2, Y = screen.Bounds.Top + screen.Bounds.Height / 2 }, 2);
+            if (monitor != IntPtr.Zero && GetDpiForMonitor(monitor, 0, out var x, out _) == 0) return x / 96.0;
+        }
+        catch { }
+        return 1;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X; public int Y; }
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(NativePoint point, uint flags);
+    [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int dpiType, out uint dpiX, out uint dpiY);
 
     private static double Clamp(double value, double min, double max) => Math.Max(min, Math.Min(max, value));
 }
