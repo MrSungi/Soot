@@ -37,6 +37,7 @@ public sealed class PetWindow : Window
     private double pressTop;
     private double lastDragDirectionX;
     private DateTime lastTick = DateTime.UtcNow;
+    private DateTime lastHoverReaction = DateTime.MinValue;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct CursorPoint { public int X; public int Y; }
@@ -77,6 +78,7 @@ public sealed class PetWindow : Window
         PreviewMouseLeftButtonDown += OnMouseDown;
         PreviewMouseLeftButtonUp += OnMouseUp;
         MouseMove += OnMouseMove;
+        MouseEnter += OnMouseEnter;
         LostMouseCapture += OnLostMouseCapture;
         timer.Tick += Tick;
         timer.Start();
@@ -158,6 +160,14 @@ public sealed class PetWindow : Window
         e.Handled = true;
     }
 
+    private void OnMouseEnter(object sender, MouseEventArgs e)
+    {
+        var now = DateTime.UtcNow;
+        if (now - lastHoverReaction < TimeSpan.FromSeconds(2)) return;
+        lastHoverReaction = now;
+        animator.React(PetReaction.Wave);
+    }
+
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
         if (!pointerDown || e.LeftButton != MouseButtonState.Pressed || !GetCursorPos(out var cursor)) return;
@@ -169,6 +179,7 @@ public sealed class PetWindow : Window
         if (!dragging && Math.Sqrt((double)dx * dx + (double)dy * dy) >= threshold)
         {
             dragging = true;
+            animator.React(PetReaction.Pickup);
             panel.Close();
         }
 
@@ -189,10 +200,11 @@ public sealed class PetWindow : Window
         if (dragging)
         {
             SaveSettings();
+            animator.React(PetReaction.Release);
         }
         else
         {
-            animator.React();
+            animator.React(PetReaction.Wave);
             if (panelWasOpenAtPress) panel.Close();
             else panel.Open(ShouldPlacePanelLeft());
         }
@@ -203,7 +215,11 @@ public sealed class PetWindow : Window
     private void OnLostMouseCapture(object sender, MouseEventArgs e)
     {
         if (!pointerDown) return;
-        if (dragging) SaveSettings();
+        if (dragging)
+        {
+            SaveSettings();
+            animator.React(PetReaction.Release);
+        }
         pointerDown = false;
         dragging = false;
     }
@@ -243,6 +259,7 @@ public sealed class PetWindow : Window
         if (dragging && Math.Abs(lastDragDirectionX) > 0.1) facingRight = lastDragDirectionX > 0;
         var pose = animator.Update(elapsed, isWalking, facingRight, settings.AnimationsEnabled);
         sprite.Source = pose.Frame;
+        sprite.Opacity = pose.Opacity;
         scale.ScaleX = pose.ScaleX;
         scale.ScaleY = pose.ScaleY;
     }
